@@ -83,7 +83,7 @@ int do_set_auth_rules(struct auth_ioc_arg* arg)
 		return -1;
 	}
 	data = (void*)arg + sizeof(struct auth_ioc_arg);  
-	return update_auth_rules((struct auth_ip_rule *)data, arg->num);
+	return update_auth_rules((struct ioc_auth_ip_rule *)data, arg->num);
 }
 
 

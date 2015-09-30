@@ -261,7 +261,7 @@ static unsigned int packet_process(struct sk_buff* skb, const struct net_device 
 			if (user == NULL) {
 				return NF_DROP;
 			}
-			display_all_user();
+			//display_all_user();
 		}
 	}
 

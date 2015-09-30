@@ -10,6 +10,7 @@
 struct auth_user_hash {
 	struct hlist_head slots[AUTH_USER_HASH_SIZE];
 	uint32_t n_slot_user[AUTH_USER_HASH_SIZE];
+	spinlock_t lock;
 };
 
 struct auth_user_set {
@@ -125,7 +126,7 @@ static void user_info_collet(uint64_t tm_stamp)
 		s_user_set.valid = 0;
 		return;
 	}
-
+	spin_lock_bh(&s_user_hash.lock);
 	for (i = 0, slot_idx = 0; slot_idx < AUTH_USER_HASH_SIZE; slot_idx++) {
 		hslot = &s_user_hash.slots[slot_idx];
 		hlist_for_each_entry(user, hslot, user_node) {
@@ -136,6 +137,7 @@ static void user_info_collet(uint64_t tm_stamp)
 			memcpy(info->mac, user->info.mac, ETH_ALEN);
 		}
 	}
+	spin_unlock_bh(&s_user_hash.lock);
 	s_user_set.nc_user = total_user;
 	s_user_set.tm_stamp = tm_stamp;
 	s_user_set.nc_used_user = 0;
@@ -218,13 +220,14 @@ struct  user_node *auth_user_get(const unsigned char *mac)
 
 	hkey = auth_user_mac_hash(mac);
 	hslot = &s_user_hash.slots[hkey & AUTH_USER_HASH_MASK];
-
+	spin_lock_bh(&s_user_hash.lock);
 	hlist_for_each_entry(user, hslot, user_node) {
 		if (memcmp(user->info.mac, mac, ETH_ALEN) == 0) {
 			existence = 1;
 			break;
 		}
 	}
+	spin_unlock_bh(&s_user_hash.lock);
 	if (existence) {
 		return user;
 	}
@@ -256,9 +259,11 @@ struct user_node *auth_user_add(struct user_info *user_info)
 				user->info.mac[0],  user->info.mac[1],  user->info.mac[2],
 				user->info.mac[3],  user->info.mac[4],  user->info.mac[5]);
 	#endif
+	spin_lock_bh(&s_user_hash.lock);
 	hslot = &s_user_hash.slots[hkey & AUTH_USER_HASH_MASK];
 	hlist_add_head(&user->user_node, hslot);
 	s_user_hash.n_slot_user[hkey & AUTH_USER_HASH_MASK] ++;
+	spin_unlock_bh(&s_user_hash.lock);
 	return user;
 }
 
@@ -333,6 +338,7 @@ static void auth_user_watchdog_fn(unsigned long arg)
 	struct hlist_head *hslot = NULL;
 	struct user_node *user = NULL;
 	struct hlist_node *node = NULL;
+	spin_lock_bh(&s_user_hash.lock);
 	for (slot_idx = 0; slot_idx < AUTH_USER_HASH_SIZE; slot_idx++) {
 		hslot = &s_user_hash.slots[slot_idx];
 		hlist_for_each_entry_safe(user, node, hslot, user_node) {
@@ -347,6 +353,7 @@ static void auth_user_watchdog_fn(unsigned long arg)
 		}
 	}
 	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval);
+	spin_unlock_bh(&s_user_hash.lock);
 #if DEBUG_ENABLE
 	if (free_total) {
 		AUTH_DEBUG("Totally, free %u users for timeout.\n", free_total);
@@ -388,6 +395,7 @@ int auth_user_init(void)
 	for (idx = 0; idx < AUTH_USER_HASH_SIZE; idx++) {
 		INIT_HLIST_HEAD(&s_user_hash.slots[idx]);
 	}
+	spin_lock_init(&s_user_hash.lock);
 	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval);
 	AUTH_INFO("auth_user_init success.\n");
 	return 0;

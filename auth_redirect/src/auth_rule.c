@@ -19,6 +19,7 @@ struct auth_rule_config {
 	struct auth_options auth_option;
 	struct list_head if_list;
 	enum AUTH_RULE_CONF_STAT_E status;
+	spinlock_t lock;
 };
 
 static struct auth_rule_config s_auth_cfg;
@@ -69,14 +70,13 @@ void display_auth_ip_rules(void)
 
 
 /*clean old auth rules*/
-int clean_auth_rules(void)
+static int clean_auth_rules(void)
 {
 	struct auth_ip_rule_node *rule_node = NULL;
 	struct list_head *cur = NULL, *next = NULL;
 #if DEBUG_ENABLE
 	int free_cnt = 0;
 #endif
-
 	/*if don't check empty, will cause error.*/
 	if (list_empty(&s_auth_cfg.rule_list)) {
 	#if DEBUG_ENABLE
@@ -187,7 +187,9 @@ static int auth_options_check(struct auth_options *options)
 int set_auth_options(struct auth_options *options)
 {
 	struct auth_options *dst_options = &s_auth_cfg.auth_option;
+	spin_lock_bh(&s_auth_cfg.lock);
 	if (auth_options_check(options) != 0) {
+		spin_unlock_bh(&s_auth_cfg.lock);
 		return -1;
 	}
 	dst_options->user_check_intval = options->user_check_intval;
@@ -196,6 +198,7 @@ int set_auth_options(struct auth_options *options)
 	memset(dst_options->redirect_title, 0, REDIRECT_TITLE_MAX);
 	memcpy(dst_options->redirect_title, options->redirect_title, REDIRECT_TITLE_MAX - 1);
 	display_auth_options();
+	spin_unlock_bh(&s_auth_cfg.lock);
 	return 0;
 }
 
@@ -288,6 +291,7 @@ int update_auth_rules(struct ioc_auth_ip_rule *ip_rules, uint32_t n_rule)
 	struct auth_ip_rule_node **ip_rule_nodes = NULL;
 	struct ioc_auth_ip_rule *cur_rule = NULL;
 	auth_cfg_disable();
+	spin_lock_bh(&s_auth_cfg.lock);
 	if (n_rule == 0) {
 		/*no rule, so, clear old rules*/
 		clean_auth_rules();
@@ -350,6 +354,7 @@ OUT:
 			ip_rule_nodes = NULL;
 		}
 	}
+	spin_unlock_bh(&s_auth_cfg.lock);
 	auth_cfg_enable();
 	if (no_mem) {
 		return -1;
@@ -374,6 +379,7 @@ int update_auth_if_info(struct auth_if_info* if_info, uint16_t n_if)
 	struct if_info_node **if_info_nodes = NULL;
 
 	auth_cfg_disable();
+	spin_lock_bh(&s_auth_cfg.lock);
 	if (n_if == 0) {
 		clean_auth_if_infos();
 		goto OUT;
@@ -422,6 +428,7 @@ OUT:
 			if_info_nodes = NULL;
 		}
 	}
+	spin_unlock_bh(&s_auth_cfg.lock);
 	auth_cfg_enable();
 	if (no_mem) {
 		return -1;
@@ -435,7 +442,7 @@ OUT:
 /*0-->unmatch, 1-->match*/
 int flow_dir_check(const char *inname, const char *outname) 
 {
-	int in_match = 0, out_match = 0;
+	int in_match = 0, out_match = 0, check_res = FLOW_NONEED_CHECK;
 	struct list_head *cur = NULL;
 	struct if_info_node *cur_node = NULL;
 	struct auth_if_info *if_info = NULL;
@@ -443,9 +450,10 @@ int flow_dir_check(const char *inname, const char *outname)
 	if (inname == NULL || outname == NULL) {
 		return FLOW_NONEED_CHECK;
 	}
-	
+	spin_lock_bh(&s_auth_cfg.lock);
 	if (list_empty(&s_auth_cfg.if_list)) {
-		return FLOW_NONEED_CHECK;
+		check_res =  FLOW_NONEED_CHECK;
+		goto OUT;
 	}
 	/*LAN-->LAN-->...>WAN-->WAN*/
 	list_for_each(cur, &s_auth_cfg.if_list) {
@@ -460,7 +468,8 @@ int flow_dir_check(const char *inname, const char *outname)
 		}
 	}
 	if (in_match == 0) {
-		return FLOW_NONEED_CHECK;
+		check_res = FLOW_NONEED_CHECK;
+		goto OUT;
 	}
 	list_for_each_prev(cur, &s_auth_cfg.if_list) {
 		cur_node = list_entry(cur, struct if_info_node, if_node);
@@ -474,9 +483,13 @@ int flow_dir_check(const char *inname, const char *outname)
 		}
 	}
 	if (out_match == 0) {
-		return FLOW_NONEED_CHECK;
+		check_res = FLOW_NONEED_CHECK;
+		goto OUT;
 	}
-	return FLOW_NEED_CHECK;
+	check_res = FLOW_NEED_CHECK;
+OUT:
+	spin_unlock_bh(&s_auth_cfg.lock);
+	return check_res;
 }
 
 
@@ -488,8 +501,9 @@ int auth_rule_check(uint32_t ipv4)
 	struct list_head *cur = NULL;
 	struct auth_ip_rule_node *cur_node = NULL;
 	struct auth_ip_rule *ip_rule = NULL;
-
+	spin_lock_bh(&s_auth_cfg.lock);
 	if (list_empty(&s_auth_cfg.rule_list)) {
+		spin_unlock_bh(&s_auth_cfg.lock);
 		return auth_res;
 	}
 	list_for_each(cur, &s_auth_cfg.rule_list) {
@@ -525,6 +539,7 @@ int auth_rule_check(uint32_t ipv4)
 		}
 		break;
 	}
+	spin_unlock_bh(&s_auth_cfg.lock);
 	AUTH_DEBUG("HOST:%pI4h, AUTH_RES:%d.\n", &ipv4, auth_res);
 	return auth_res;
 }
@@ -538,13 +553,19 @@ int get_auth_cfg_status(void)
 
 void auth_cfg_enable(void)
 {
+	smp_mb();
 	s_auth_cfg.status = AUTH_CONF_AVAILABLE;
+	smp_mb();
+	synchronize_rcu();
 }
 
 
 void auth_cfg_disable(void)
 {
+	smp_mb();
 	s_auth_cfg.status = AUTH_CONF_UNAVAILABLE;
+	smp_mb();
+	synchronize_rcu();
 }
 
 
@@ -553,6 +574,7 @@ int auth_rule_init()
 	memset(&s_auth_cfg, 0, sizeof(struct auth_rule_config));
 	INIT_LIST_HEAD(&s_auth_cfg.rule_list);
 	INIT_LIST_HEAD(&s_auth_cfg.if_list);
+	spin_lock_init(&s_auth_cfg.lock);
 	s_auth_cfg.status = AUTH_CONF_AVAILABLE;
 	return 0;
 }
