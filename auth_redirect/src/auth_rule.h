@@ -21,7 +21,7 @@ enum FLOW_DIR_CHECK_RES_CODE_E {
 int auth_rule_init(void);
 void auth_rule_fini(void);
 
-int update_auth_rules(struct auth_ip_rule *ip_rules, uint32_t n_rule);
+int update_auth_rules(struct ioc_auth_ip_rule *ip_rules, uint32_t n_rule);
 int update_auth_options(struct auth_options *options);
 int update_auth_if_info(struct auth_if_info* if_info, uint16_t n_if);
 

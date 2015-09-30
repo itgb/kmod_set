@@ -404,9 +404,6 @@ static int __init auth_init(void)
 		return ret;
 	}
 	AUTH_INFO("auth_init success.\n");
-	auth_user_add_test();
-	// // auth_user_test();
-	// // auth_user_test();
 	return ret;
 }
 

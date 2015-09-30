@@ -5,8 +5,10 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <asm/uaccess.h>
+#include <linux/string.h>
 #include <linux/rwlock_types.h>
 #include <linux/rwlock.h>
+
 
 #define DEBUG_ENABLE 1
 

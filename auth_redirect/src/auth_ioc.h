@@ -24,13 +24,44 @@ enum IP_RULE_TYPE_E {
 };
 
 /*ipv4 range*/
-struct auth_ip_rule {
-	uint8_t 	type;	/*normal, white, black*/
-	uint8_t		priority;
-	uint8_t 	enable;
-	uint32_t	min;	/*min ip*/
-	uint32_t 	max;	/*max ip*/
+// struct auth_ip_rule {
+// 	uint8_t 	type;	/*normal, white, black*/
+// 	uint8_t		priority;
+// 	uint8_t 	enable;
+// 	uint32_t	min;	/*min ip*/
+// 	uint32_t 	max;	/*max ip*/
+// };
+
+#define AUTH_RULE_NAME_MAX		128		/*the max name size of rule*/
+struct ip_range {
+	uint32_t min;
+	uint32_t max;
 };
+
+struct auth_ip_rule
+{
+	char		name[AUTH_RULE_NAME_MAX];
+	uint32_t 	type;
+	uint32_t	enable;
+	uint32_t 	priority;
+	struct ip_range *ip_ranges;
+	uint32_t 	nc_ip_range;
+};
+
+struct ioc_auth_ip_rule {
+	char		name[AUTH_RULE_NAME_MAX];
+	uint32_t 	type;
+	uint32_t	enable;
+	uint32_t 	priority;
+	uint32_t 	nc_ip_range;
+	/*struct ip_range *ip_ranges*/
+};
+
+// struct auth_ip_rule_node {
+// 	struct list_head rule_node;
+// 	struct auth_ip_rule ip_rule;
+// };
+
 
 /*auth options*/
 struct auth_options {

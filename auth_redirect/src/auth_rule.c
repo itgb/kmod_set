@@ -24,16 +24,35 @@ struct auth_rule_config {
 static struct auth_rule_config s_auth_cfg;
 
 
+static char *safe_strncpy(char *dst, const char *src, const size_t len)
+{
+	if (dst == NULL || src == NULL) {
+		return NULL;
+	}
+	if (strlen(src) >= len) {
+		strncpy(dst, src, len - 1);
+		dst[len - 1] = '\0';
+	}
+	else {
+		strncpy(dst, src, strlen(src));
+		dst[strlen(src)] = '\0';
+	}
+	return NULL;
+}
+
 static void display_auth_ip_rule(struct auth_ip_rule *ip_rule)
 {
+	uint32_t i = 0;
 	char ip_rule_type_str[IP_RULE_TYPE_NUM][IP_RULE_TYPE_STR_LEN] = {
 		"NORMAL", "WHITE", "BLACK"};
 	AUTH_DEBUG("--------IP_RULE BEGIN---------\n");
+	AUTH_DEBUG("Name of ip rule: %s.\n", ip_rule->name);
 	AUTH_DEBUG("TYPE of ip rule: %s.\n", ip_rule_type_str[ip_rule->type]);
 	AUTH_DEBUG("PRIORITY of ip rule: %d.\n", ip_rule->priority);
 	AUTH_DEBUG("ENABLE of ip rule: %d.\n", ip_rule->enable);
-	AUTH_DEBUG("MIN of ip rule: %d.\n", ip_rule->min);
-	AUTH_DEBUG("MAX of ip rule: %d.\n", ip_rule->max);
+	for (i = 0; i < ip_rule->nc_ip_range; i++) {
+		AUTH_DEBUG("[min:%pI4h --> max:%pI4h].\n", &ip_rule->ip_ranges[i].min, &ip_rule->ip_ranges[i].max);
+	}
 	AUTH_DEBUG("--------IP_RULE END---------\n");
 }
 
@@ -73,6 +92,10 @@ int clean_auth_rules(void)
 		display_auth_ip_rule(&rule_node->ip_rule);
 		free_cnt ++;
 	#endif
+		if (rule_node->ip_rule.ip_ranges) {
+			kfree(rule_node->ip_rule.ip_ranges);
+			rule_node->ip_rule.ip_ranges = NULL;
+		}
 		kfree(rule_node);
 		rule_node = NULL;
 	}
@@ -106,14 +129,31 @@ int add_auth_rule(struct auth_ip_rule_node *ip_rule_node)
 
 
 int copy_auth_ip_rule_to_node(struct auth_ip_rule_node *rule_node, 
-										struct auth_ip_rule *ip_rule)
+										struct ioc_auth_ip_rule *ip_rule)
 {
+	uint32_t i = 0, offset = 0;
+	struct ip_range *ranges = NULL, *src_range = NULL;
+	
 	struct auth_ip_rule *dst_ip_rule = &rule_node->ip_rule;
+
+	ranges = (struct ip_range*)AUTH_NEW_N(struct ip_range, ip_rule->nc_ip_range);
+	if (ranges == NULL) {
+		AUTH_ERROR("No memory.\n");
+		return -1;
+	}
+	dst_ip_rule->ip_ranges = ranges;
+	dst_ip_rule->nc_ip_range = ip_rule->nc_ip_range;
+	offset = sizeof(struct ioc_auth_ip_rule);
+	for (i = 0; i < ip_rule->nc_ip_range; i++) {
+		src_range = (struct ip_range*)((void*)ip_rule + offset);
+		ranges[i].min = src_range->min;
+		ranges[i].max = src_range->max;
+		offset += sizeof(struct ip_range);
+	}
+	safe_strncpy(dst_ip_rule->name, ip_rule->name, AUTH_RULE_NAME_MAX);
 	dst_ip_rule->type = ip_rule->type;
 	dst_ip_rule->priority = ip_rule->priority;
 	dst_ip_rule->enable = ip_rule->enable;
-	dst_ip_rule->min = ip_rule->min;
-	dst_ip_rule->max = ip_rule->max;
 	return 0;
 }
 
@@ -242,11 +282,11 @@ static int copy_auth_if_info_to_node(struct if_info_node *if_info_node, struct a
 *Lastly, adding new rules to rule_list.
 *Notice: smp is also need considered.
 */
-int update_auth_rules(struct auth_ip_rule *ip_rules, uint32_t n_rule)
+int update_auth_rules(struct ioc_auth_ip_rule *ip_rules, uint32_t n_rule)
 {
-	int i = 0, no_mem = 0;
+	int i = 0, no_mem = 0, offset = 0;
 	struct auth_ip_rule_node **ip_rule_nodes = NULL;
-
+	struct ioc_auth_ip_rule *cur_rule = NULL;
 	auth_cfg_disable();
 	if (n_rule == 0) {
 		/*no rule, so, clear old rules*/
@@ -268,6 +308,7 @@ int update_auth_rules(struct auth_ip_rule *ip_rules, uint32_t n_rule)
 			no_mem = 1;
 			goto OUT;
 		}
+		ip_rule_nodes[i]->ip_rule.ip_ranges = NULL;
 		INIT_LIST_HEAD(&ip_rule_nodes[i]->rule_node);
 	}
 
@@ -275,9 +316,17 @@ int update_auth_rules(struct auth_ip_rule *ip_rules, uint32_t n_rule)
 	clean_auth_rules();
 
 	/*insert new rule*/
+	cur_rule = ip_rules;
 	for (i = 0; i < n_rule; i++) {
-		copy_auth_ip_rule_to_node(ip_rule_nodes[i], &ip_rules[i]);
+		AUTH_DEBUG("rule:%p.\n", cur_rule);
+		if (copy_auth_ip_rule_to_node(ip_rule_nodes[i], cur_rule) != 0) {
+			no_mem = 1;
+			goto OUT; 
+		}
 		add_auth_rule(ip_rule_nodes[i]);
+		offset = cur_rule->nc_ip_range * sizeof(struct ip_range) + sizeof(struct ioc_auth_ip_rule);
+		cur_rule = (struct auth_ip_rule*)((void*)cur_rule + offset);
+		AUTH_DEBUG("newt_rule:%p. offset:%x\n", cur_rule, offset);
 	}
 
 #if DEBUG_ENABLE
@@ -289,6 +338,10 @@ OUT:
 		if (ip_rule_nodes) {
 			for (i = 0; i < n_rule; i++) {
 				if (ip_rule_nodes[i]) {
+					if (ip_rule_nodes[i]->ip_rule.ip_ranges) {
+						kfree(ip_rule_nodes[i]->ip_rule.ip_ranges);
+						ip_rule_nodes[i]->ip_rule.ip_ranges = NULL;
+					}
 					kfree(ip_rule_nodes[i]);
 					ip_rule_nodes[i] = NULL;
 				}
@@ -431,7 +484,7 @@ int flow_dir_check(const char *inname, const char *outname)
  *Second step, i.e, last step, return the process code.*/
 int auth_rule_check(uint32_t ipv4)
 {
-	int auth_res = AUTH_RULE_PASS;	/*default process is pass*/
+	int i = 0, matched = 0, auth_res = AUTH_RULE_PASS;	/*default process is pass*/
 	struct list_head *cur = NULL;
 	struct auth_ip_rule_node *cur_node = NULL;
 	struct auth_ip_rule *ip_rule = NULL;
@@ -446,7 +499,14 @@ int auth_rule_check(uint32_t ipv4)
 		}
 		ip_rule = &cur_node->ip_rule;
 		/*ip in range*/
-		if (ipv4 <= ip_rule->min || ipv4 >= ip_rule->max) {
+		for (i = 0; i < ip_rule->nc_ip_range; i++) {
+			if (ipv4 <= ip_rule->ip_ranges[i].min || ipv4 >= ip_rule->ip_ranges[i].max) {
+				continue;
+			}
+			matched = 1;
+			break;
+		}
+		if (matched == 0) {
 			continue;
 		}
 		switch (ip_rule->type) {

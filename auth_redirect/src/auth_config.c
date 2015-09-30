@@ -21,7 +21,9 @@ static int auth_io_arg_check(struct auth_ioc_arg* arg, enum ARG_TYPE_E arg_type)
 		case AUTH_RULE: 
 		{	/*arg->num == 0 means cleaning rule*/
 			unit_len = sizeof(struct auth_ip_rule);
-			break;
+			//break;
+			/*todo:special check*/
+			return 0;	/*AUTH_RULE Passing check directly*/
 		}
 
 		case AUTH_OPTION:
@@ -77,7 +79,6 @@ INVALID:
 int do_set_auth_rules(struct auth_ioc_arg* arg)
 {
 	void *data = NULL;
-
 	if (auth_io_arg_check(arg, AUTH_RULE) != 0) {
 		return -1;
 	}
