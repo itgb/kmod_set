@@ -1,6 +1,7 @@
 #include "auth_comm.h"
 #include "auth_ioc.h"
 #include "auth_rule.h"
+#include "auth_user.h"
 
 /*auth ip rule node*/
 struct auth_ip_rule_node {
@@ -52,7 +53,8 @@ static void display_auth_ip_rule(struct auth_ip_rule *ip_rule)
 	AUTH_DEBUG("PRIORITY of ip rule: %d.\n", ip_rule->priority);
 	AUTH_DEBUG("ENABLE of ip rule: %d.\n", ip_rule->enable);
 	for (i = 0; i < ip_rule->nc_ip_range; i++) {
-		AUTH_DEBUG("[min:%pI4h --> max:%pI4h].\n", &ip_rule->ip_ranges[i].min, &ip_rule->ip_ranges[i].max);
+		AUTH_DEBUG("[min:%pI4h  --> max:%pI4h].\n", &ip_rule->ip_ranges[i].min, &ip_rule->ip_ranges[i].max);
+		AUTH_DEBUG("[min:%u  --> max:%u].\n", ip_rule->ip_ranges[i].min, ip_rule->ip_ranges[i].max);
 	}
 	AUTH_DEBUG("--------IP_RULE END---------\n");
 }
@@ -128,6 +130,9 @@ int add_auth_rule(struct auth_ip_rule_node *ip_rule_node)
 }
 
 
+/*
+*Notice, All number data between user space and kernel are host order.
+*/
 int copy_auth_ip_rule_to_node(struct auth_ip_rule_node *rule_node, 
 										struct ioc_auth_ip_rule *ip_rule)
 {
@@ -186,6 +191,8 @@ static int auth_options_check(struct auth_options *options)
 
 int set_auth_options(struct auth_options *options)
 {
+	#define MINUTE_TO_SECOND	60		/*minute to second*/
+	#define SECOND_TO_MS		1000	/*second to millisecond*/
 	struct auth_options *dst_options = &s_auth_cfg.auth_option;
 	spin_lock_bh(&s_auth_cfg.lock);
 	if (auth_options_check(options) != 0) {
@@ -199,6 +206,8 @@ int set_auth_options(struct auth_options *options)
 	memcpy(dst_options->redirect_title, options->redirect_title, REDIRECT_TITLE_MAX - 1);
 	display_auth_options();
 	spin_unlock_bh(&s_auth_cfg.lock);
+	watchdog_tm_update(dst_options->user_check_intval * MINUTE_TO_SECOND * SECOND_TO_MS);
+	#undef MINUTE_TO_SECOND
 	return 0;
 }
 
@@ -329,7 +338,7 @@ int update_auth_rules(struct ioc_auth_ip_rule *ip_rules, uint32_t n_rule)
 		}
 		add_auth_rule(ip_rule_nodes[i]);
 		offset = cur_rule->nc_ip_range * sizeof(struct ip_range) + sizeof(struct ioc_auth_ip_rule);
-		cur_rule = (struct auth_ip_rule*)((void*)cur_rule + offset);
+		cur_rule = (struct ioc_auth_ip_rule*)((void*)cur_rule + offset);
 		AUTH_DEBUG("newt_rule:%p. offset:%x\n", cur_rule, offset);
 	}
 
@@ -439,7 +448,7 @@ OUT:
 
 
 /**********************************auth_realted**********************************/
-/*0-->unmatch, 1-->match*/
+/*FLOW_NEED_CHECK, FLOW_NONEED_CHECK*/
 int flow_dir_check(const char *inname, const char *outname) 
 {
 	int in_match = 0, out_match = 0, check_res = FLOW_NONEED_CHECK;
@@ -455,7 +464,7 @@ int flow_dir_check(const char *inname, const char *outname)
 		check_res =  FLOW_NONEED_CHECK;
 		goto OUT;
 	}
-	/*LAN-->LAN-->...>WAN-->WAN*/
+	/*if_list layout:LAN-->LAN-->...>WAN-->WAN*/
 	list_for_each(cur, &s_auth_cfg.if_list) {
 		cur_node = list_entry(cur, struct if_info_node, if_node);
 		if_info = &cur_node->if_info;
@@ -487,7 +496,13 @@ int flow_dir_check(const char *inname, const char *outname)
 		goto OUT;
 	}
 	check_res = FLOW_NEED_CHECK;
+
 OUT:
+// #if DEBUG_ENABLE
+// 	if (check_res == FLOW_NEED_CHECK) {
+// 		AUTH_DEBUG("check_res=%s (in:%s, out:%s)\n", ("need check"), inname, outname);
+// 	}
+// #endif
 	spin_unlock_bh(&s_auth_cfg.lock);
 	return check_res;
 }
@@ -540,7 +555,14 @@ int auth_rule_check(uint32_t ipv4)
 		break;
 	}
 	spin_unlock_bh(&s_auth_cfg.lock);
-	AUTH_DEBUG("HOST:%pI4h, AUTH_RES:%d.\n", &ipv4, auth_res);
+#if DEBUG_ENABLE
+	if (matched) {
+		AUTH_DEBUG("STA(%pI4h) match rule, check_res=%u.\n",  &ipv4, auth_res);
+	}
+	else {
+		AUTH_DEBUG("STA(%pI4h) unmatch any rule, pass in default.\n",  &ipv4);
+	}
+#endif
 	return auth_res;
 }
 

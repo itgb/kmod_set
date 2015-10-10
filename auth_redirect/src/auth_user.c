@@ -5,7 +5,7 @@
 
 #define AUTH_USER_HASH_SIZE       (1 << 15)
 #define AUTH_USER_HASH_MASK       (AUTH_USER_HASH_SIZE - 1)
-#define WATCHDOG_EXPIRED_INTVAL		(30 * 1000)
+#define WATCHDOG_EXPIRED_INTVAL		(300 * 1000)
 
 struct auth_user_hash {
 	struct hlist_head slots[AUTH_USER_HASH_SIZE];
@@ -22,8 +22,9 @@ struct auth_user_set {
 };
 
 static struct timer_list s_watchdog_tm;	/*tm for forcing free timeout user*/
-static uint32_t s_watchdog_intval = WATCHDOG_EXPIRED_INTVAL;	/*unit is microseconds*/
-static uint32_t s_user_timeout_intval = 2 * WATCHDOG_EXPIRED_INTVAL;
+static uint32_t s_watchdog_intval_jf = 0;	/*unit is microseconds*/
+static uint32_t s_user_off_intval_jf = 0;
+static uint32_t s_user_timeout_intval_jf = 0;
 static struct auth_user_hash s_user_hash;
 static struct auth_user_set s_user_set;
 
@@ -57,7 +58,7 @@ static struct user_node *user_create(const struct user_info *user_info)
 	struct user_node *user = NULL;
 	user = AUTH_NEW(struct user_node);
 	if (user == NULL) {
-		AUTH_ERROR("no memory.\n");
+		AUTH_ERROR("create user failed for no memory.\n");
 		return user;
 	}
 	memset(user, 0, sizeof(struct user_node));
@@ -77,7 +78,7 @@ void display_user(struct user_node *user)
 	AUTH_DEBUG("MAC:%02X:%02X:%02X:%02X:%02X:%02X.\n", 
 				user->info.mac[0],  user->info.mac[1],  user->info.mac[2],
 				user->info.mac[3],  user->info.mac[4],  user->info.mac[5]);
-	AUTH_DEBUG("IPV4:%pI4h .\n", &user->info.ipv4);
+	AUTH_DEBUG("IPV4:%pI4 .\n", &user->info.ipv4);
 	AUTH_DEBUG("Status:%u.\n", user->info.status);
 	AUTH_DEBUG("Jiffes:%llu.\n", user->info.jf);
 	AUTH_DEBUG("***************DISPLAY USER END****************\n");
@@ -102,11 +103,13 @@ void display_all_user(void)
 
 static void user_info_collet(uint64_t tm_stamp)
 {
+	#define MSECS_TO_SEC 1000	/*millisecond to second*/
 	uint32_t total_user = 0;
 	uint16_t slot_idx = 0, i = 0;
 	struct user_info *info = NULL;
 	struct user_node *user = NULL;
 	struct hlist_head *hslot = NULL;
+
 	if (s_user_set.valid) {
 		kfree(s_user_set.infos);
 		memset(&s_user_set, 0, sizeof(struct auth_user_set));
@@ -130,11 +133,12 @@ static void user_info_collet(uint64_t tm_stamp)
 	for (i = 0, slot_idx = 0; slot_idx < AUTH_USER_HASH_SIZE; slot_idx++) {
 		hslot = &s_user_hash.slots[slot_idx];
 		hlist_for_each_entry(user, hslot, user_node) {
-			info  = &s_user_set.infos[i++];
+			info  = &s_user_set.infos[i];
 			info->ipv4 = user->info.ipv4;
-			info->jf = user->info.jf;
+			info->jf = jiffies_to_msecs(user->info.jf) / MSECS_TO_SEC;
 			info->status = user->info.status;
 			memcpy(info->mac, user->info.mac, ETH_ALEN);
+			i++;
 		}
 	}
 	spin_unlock_bh(&s_user_hash.lock);
@@ -184,7 +188,7 @@ int auth_users_get(struct user_stat_assist *assist)
 		AUTH_WARN("copy assist to user failed.\n");
 		goto FAILED;
 	}
-	user_addr += sizeof(struct user_stat_assist);
+	user_addr = (unsigned long)((void*)user_addr + sizeof(struct user_stat_assist));
 	if (copy_to_user((void*)user_addr, (void*)infos, copy_cnt * sizeof(struct user_info))) {
 		AUTH_WARN("copy user_info to user failed.\n");
 		goto FAILED;
@@ -193,6 +197,7 @@ int auth_users_get(struct user_stat_assist *assist)
 	if (s_user_set.nc_used_user == s_user_set.nc_user) {
 		kfree(s_user_set.infos);
 		memset(&s_user_set, 0, sizeof(struct auth_user_set));
+		s_user_set.infos = NULL;
 	}
 	AUTH_INFO("copy %u user.\n", copy_cnt);
 	return 0;
@@ -200,6 +205,7 @@ FAILED:
 	if (s_user_set.nc_user && (s_user_set.nc_used_user == s_user_set.nc_user)) {
 		kfree(s_user_set.infos);
 		memset(&s_user_set, 0, sizeof(struct auth_user_set));
+		s_user_set.infos = NULL;
 	}
 	return -EFAULT;
 }
@@ -243,7 +249,7 @@ struct user_node *auth_user_add(struct user_info *user_info)
 
 	user = auth_user_get(user_info->mac);
 	if (user) {
-		AUTH_INFO("user[%02X:%02X:%02X:%02X:%02X:%02X] already existence.\n", 
+		AUTH_DEBUG("user[%02x:%02x:%02x:%02x:%02x:%02x] already existence.\n", 
 					user_info->mac[0], user_info->mac[1], user_info->mac[2],
 					user_info->mac[3], user_info->mac[4], user_info->mac[5]);
 		return user;
@@ -254,7 +260,7 @@ struct user_node *auth_user_add(struct user_info *user_info)
 	}
 	hkey = auth_user_mac_hash(user->info.mac);
 	#if DEBUG_ENABLE
-	AUTH_DEBUG("[HKEY:%u;SLOT:%u;MAC:%02X:%02X:%02X:%02X:%02X:%02X].\n", 
+	AUTH_DEBUG("[HKEY:%u;SLOT:%u;MAC:%02x:%02x:%02x:%02x:%02x:%02x].\n", 
 				hkey, (hkey & AUTH_USER_HASH_MASK),
 				user->info.mac[0],  user->info.mac[1],  user->info.mac[2],
 				user->info.mac[3],  user->info.mac[4],  user->info.mac[5]);
@@ -333,26 +339,39 @@ static void auth_user_watchdog_fn(unsigned long arg)
 #if DEBUG_ENABLE
 	uint32_t free_total = 0;
 #endif
-	uint64_t now_tm = jiffies;
+	uint32_t now_jf = 0;
 	uint16_t slot_idx = 0;
 	struct hlist_head *hslot = NULL;
 	struct user_node *user = NULL;
 	struct hlist_node *node = NULL;
+	now_jf = jiffies;
+
 	spin_lock_bh(&s_user_hash.lock);
 	for (slot_idx = 0; slot_idx < AUTH_USER_HASH_SIZE; slot_idx++) {
 		hslot = &s_user_hash.slots[slot_idx];
 		hlist_for_each_entry_safe(user, node, hslot, user_node) {
-			if ((user->info.jf + s_user_timeout_intval) >= now_tm) {
+			if (user->info.jf < (now_jf - s_user_timeout_intval_jf)) {
 				#if DEBUG_ENABLE
 					free_total++;
-					AUTH_DEBUG("del user:%pI4h for timeout.\n", &user->info.ipv4);
+					AUTH_DEBUG("user del:%pI4h for timeout[last_jf:%llu, timeout_jf:%u, now_jf:%u].\n", 
+								&user->info.ipv4, user->info.jf, s_user_timeout_intval_jf, now_jf);
 				#endif
 				auth_user_del(slot_idx, user);
 				user = NULL;
 			}
+			else if (user->info.jf < (now_jf - s_user_off_intval_jf)) {
+				#if DEBUG_ENABLE
+				if (user->info.status == USER_ONLINE)
+				{
+					AUTH_DEBUG("user offline:%pI4h for timeout[last_jf:%llu, off_jf:%u, now_jf:%u].\n", 
+								&user->info.ipv4, user->info.jf, s_user_off_intval_jf, now_jf);
+				}
+				#endif
+				user->info.status = USER_OFFLINE;
+			}
 		}
 	}
-	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval);
+	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval_jf);
 	spin_unlock_bh(&s_user_hash.lock);
 #if DEBUG_ENABLE
 	if (free_total) {
@@ -365,21 +384,29 @@ static void auth_user_watchdog_fn(unsigned long arg)
 static int watchdog_intval_valid_check(uint32_t mesc_intval)
 {
 	/*todo:sensitivity of checking user on/off */
+	uint32_t jf = msecs_to_jiffies(mesc_intval);
+	if (jf >= MAX_JIFFY_OFFSET) {
+		return 0;
+	}
 	return 1;
 }
 
 
 /*update the timeout of watchdog timer*/
-int watchdog_tm_update(uint32_t mesc_intval)
+int watchdog_tm_update(uint32_t msesc_intval)
 {
-	if (watchdog_intval_valid_check(mesc_intval) == 0) {
-		AUTH_WARN("WATCHDOG_EXPIRED_INTVAL[%u] invalid.\n", mesc_intval);
+	if (watchdog_intval_valid_check(msesc_intval) == 0) {
+		AUTH_WARN("WATCHDOG_EXPIRED_INTVAL[%u] invalid.\n", msesc_intval);
 		return -1;
 	}
-	s_watchdog_intval = mesc_intval;
-	s_user_timeout_intval = 2 * s_watchdog_intval;
+	s_watchdog_intval_jf = msecs_to_jiffies(msesc_intval / 2);
+	s_user_off_intval_jf = (s_watchdog_intval_jf << 1);
+	s_user_timeout_intval_jf = (s_watchdog_intval_jf << 2);
+
+	AUTH_DEBUG("WATCHDOG_INTVAL_JF:%u, USER_OFFLINE_JF:%u, USER_TIMEOUT_JF:%u\n",
+				s_watchdog_intval_jf, s_user_off_intval_jf, s_user_timeout_intval_jf);
 	OS_CANCEL_TIMER(&s_watchdog_tm);
-	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval);
+	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval_jf);
 	return 0;
 }
 
@@ -388,7 +415,6 @@ int auth_user_init(void)
 {
 	uint32_t idx = 0;
 	OS_INIT_TIMER(&s_watchdog_tm, auth_user_watchdog_fn, NULL);
-	s_watchdog_intval = WATCHDOG_EXPIRED_INTVAL;
 
 	memset(&s_user_set, 0, sizeof(struct auth_user_set));
 	memset(&s_user_hash, 0, sizeof(struct auth_user_hash));
@@ -396,7 +422,13 @@ int auth_user_init(void)
 		INIT_HLIST_HEAD(&s_user_hash.slots[idx]);
 	}
 	spin_lock_init(&s_user_hash.lock);
-	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval);
+
+	s_watchdog_intval_jf = msecs_to_jiffies(WATCHDOG_EXPIRED_INTVAL);	/*unit is microseconds*/
+	s_user_off_intval_jf = (s_watchdog_intval_jf << 1);
+	s_user_timeout_intval_jf = (s_watchdog_intval_jf << 2);
+	OS_SET_TIMER(&s_watchdog_tm, s_watchdog_intval_jf);
+	AUTH_DEBUG("WATCHDOG_INTVAL_JF:%u, USER_OFFLINE_JF:%u, USER_TIMEOUT_JF:%u\n",
+				s_watchdog_intval_jf, s_user_off_intval_jf, s_user_timeout_intval_jf);
 	AUTH_INFO("auth_user_init success.\n");
 	return 0;
 }

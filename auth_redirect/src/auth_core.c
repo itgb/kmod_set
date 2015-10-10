@@ -28,7 +28,7 @@
 #define DRV_DESC	"auth driver"
 
 
-#define NET_IPQUAD(addr) \
+#define NIPQUAD(addr) \
 	((unsigned char *)&addr)[0], \
 	((unsigned char *)&addr)[1], \
 	((unsigned char *)&addr)[2], \
@@ -95,8 +95,7 @@ static int do_auth_redirect(struct sk_buff *skb, const struct net_device *dev)
 	snprintf(payload, sizeof(payload), REDIRECT_URL, 
 			old_eth->h_source[0], old_eth->h_source[1], old_eth->h_source[2],
 			old_eth->h_source[3], old_eth->h_source[4], old_eth->h_source[5],
-			NET_IPQUAD(old_iph->saddr));
-
+			NIPQUAD(old_iph->saddr));
 	header_len = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr);
 	nskb = alloc_skb(header_len + payload_len, GFP_ATOMIC);
 	if (!nskb) {
@@ -145,8 +144,9 @@ static int do_auth_redirect(struct sk_buff *skb, const struct net_device *dev)
 	new_eth->h_proto = htons(ETH_P_IP);
 	nskb->dev = (struct net_device *)dev;
 	ret = dev_queue_xmit(nskb);
+#if FREQ_DEBUG_ENABLE
 	AUTH_DEBUG("dev_queue_xmit ret = %d.\n", ret);
-
+#endif
 	#undef REDIRECT_URL
 	#undef REDIRECT_URL_SIZE
 	return ret;
@@ -209,7 +209,9 @@ static int do_auth_reset(struct sk_buff *skb, const struct net_device *dev)
 	
 	nskb->dev = (struct net_device *)dev;
 	ret = dev_queue_xmit(nskb);
+#if FREQ_DEBUG_ENABLE
 	AUTH_DEBUG("dev_queue_xmit ret = %d.\n", ret);
+#endif
 	return 0;
 }
 
@@ -242,9 +244,8 @@ static unsigned int packet_process(struct sk_buff* skb, const struct net_device 
 		return NF_ACCEPT;
 	}
 
-	memcpy(&info.mac, eth_header->h_source, ETH_ALEN);
-	info.ipv4 = ip_header->saddr;
-
+	memcpy(info.mac, eth_header->h_source, ETH_ALEN);
+	info.ipv4 = ntohl(ip_header->saddr); 
 	user = auth_user_get(info.mac);
 	if (user) {
 		if (auth_user_status(user) == USER_ONLINE) {
@@ -261,10 +262,8 @@ static unsigned int packet_process(struct sk_buff* skb, const struct net_device 
 			if (user == NULL) {
 				return NF_DROP;
 			}
-			//display_all_user();
 		}
 	}
-
 	switch(check_ret) {
 		case AUTH_RULE_PASS:
 			return NF_ACCEPT;
@@ -291,15 +290,25 @@ static unsigned int redirect_nf_hook(
 {
 	unsigned int res = NF_ACCEPT;
 	struct iphdr *iph = NULL;
+	struct tcphdr *tcph = NULL;
+	struct udphdr *udph = NULL;
 	struct sk_buff *linear_skb = NULL, *use_skb = NULL;
+	int tcphdr_len = 0, tcpdata_len = 0;
+	char *tcp_data = NULL;
 
 	/*if config isn't available, return directly.*/
 	if (get_auth_cfg_status() != AUTH_CONF_AVAILABLE) {
 		return NF_ACCEPT;
 	}
+	
+	/* Internet Protocol packet	 need check*/
+	if (skb->protocol != htons(ETH_P_IP)) {
+		return NF_ACCEPT;
+	}
+
 	/*TCP, UDP, ICMP, supported.*/
 	iph = ip_hdr(skb);
-	if (iph && (iph->protocol != IPPROTO_TCP) 
+	if ((iph->protocol != IPPROTO_TCP) 
 		&& (iph->protocol != IPPROTO_UDP) 
 		&& (iph->protocol != IPPROTO_ICMP)) {
 		return NF_ACCEPT;
@@ -316,6 +325,43 @@ static unsigned int redirect_nf_hook(
 		ipv4_is_zeronet(iph->daddr))
 	{
 		return NF_ACCEPT;
+	}
+
+	switch (iph->protocol) {
+		case IPPROTO_TCP:
+		{
+			tcph = (struct tcphdr *)(skb->data + (iph->ihl << 2));
+			if (tcph->syn || tcph->fin || tcph->rst) {
+		 		return NF_ACCEPT;
+			}
+
+			tcphdr_len = tcph->doff * 4;
+			tcp_data = (char*)tcph + tcphdr_len;
+			tcpdata_len = ntohs(iph->tot_len) - iph->ihl * 4 - tcphdr_len; 
+			if (tcpdata_len < 4 || strncasecmp(tcp_data, "GET ", 4) != 0) {
+				return NF_ACCEPT;
+			}
+
+			break;
+		}
+
+		case IPPROTO_UDP:
+		{
+			udph = (struct udphdr *)(skb->data + (iph->ihl << 2));
+			if (ntohs(udph->dest) == 53) {
+				return NF_ACCEPT; 	/* DNS PASS*/ 
+			}
+			if (ntohs(udph->dest) == 67) {
+				return NF_ACCEPT;	/*in fact, DHCP is multicast packet*/
+			}
+			break;
+		}
+
+		case IPPROTO_ICMP:
+		{
+			break;
+		}
+
 	}
 
 	/*这里如果不线性化检查, OUTPUT抓取的数据包, 数据区可能为空.*/
@@ -350,32 +396,32 @@ static struct nf_hook_ops redirect_nf_hook_ops[] = {
 };
 
 
-#include <linux/delay.h>
-static void auth_user_add_test(void)
-{
-	#define AUTH_USER_COUNT 5
-	int i = 0;
-	struct user_node *user = NULL;
-	struct user_info info[AUTH_USER_COUNT] = {
-		{2886729808U, 0, {0}},
-		{2886729809U, 0, {0}},
-		{2886729810U, 0, {0}},
-		{2886729811U, 0, {0}},
-		{2886729812U, 0, {0}}
-	};
+// #include <linux/delay.h>
+// static void auth_user_add_test(void)
+// {
+// 	#define AUTH_USER_COUNT 5
+// 	int i = 0;
+// 	struct user_node *user = NULL;
+// 	struct user_info info[AUTH_USER_COUNT] = {
+// 		{2886729808U, 0, {0}},
+// 		{2886729809U, 0, {0}},
+// 		{2886729810U, 0, {0}},
+// 		{2886729811U, 0, {0}},
+// 		{2886729812U, 0, {0}}
+// 	};
 
-	for (i = 0; i < AUTH_USER_COUNT; i++) {
-		info[i].mac[0] = 172;
-		info[i].mac[1] = 96;
-		info[i].mac[2] = 128;
-		info[i].mac[3] = 64;
-		info[i].mac[4] = 32;
-		info[i].mac[5] = 16 + i;
-		user = auth_user_add(&info[i]);
-	}
-	display_all_user();
-	#undef AUTH_USER_COUNT
-}
+// 	for (i = 0; i < AUTH_USER_COUNT; i++) {
+// 		info[i].mac[0] = 172;
+// 		info[i].mac[1] = 96;
+// 		info[i].mac[2] = 128;
+// 		info[i].mac[3] = 64;
+// 		info[i].mac[4] = 32;
+// 		info[i].mac[5] = 16 + i;
+// 		user = auth_user_add(&info[i]);
+// 	}
+// 	display_all_user();
+// 	#undef AUTH_USER_COUNT
+// }
 
 
 static int __init auth_init(void)
